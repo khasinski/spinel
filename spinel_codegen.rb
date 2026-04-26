@@ -2340,6 +2340,17 @@ class Compiler
           return "string"
         end
         if rt == "int_array"
+          # arr[i, n] and arr[range] return a new IntArray slice; arr[i] returns int
+          ia_args_id = @nd_arguments[nid]
+          if ia_args_id >= 0
+            ia_aargs = get_args(ia_args_id)
+            if ia_aargs.length >= 2
+              return "int_array"
+            end
+            if ia_aargs.length == 1 && @nd_type[ia_aargs[0]] == "RangeNode"
+              return "int_array"
+            end
+          end
           return "int"
         end
         if rt == "sym_array"
@@ -14192,6 +14203,18 @@ class Compiler
         return "sp_IntArray_length(" + rc + ")"
       end
       if mname == "[]"
+        ia_args_id = @nd_arguments[nid]
+        if ia_args_id >= 0
+          ia_aargs = get_args(ia_args_id)
+          if ia_aargs.length >= 1 && @nd_type[ia_aargs[0]] == "RangeNode"
+            ia_left  = compile_expr(@nd_left[ia_aargs[0]])
+            ia_right = compile_expr(@nd_right[ia_aargs[0]])
+            return "sp_IntArray_slice(" + rc + ", " + ia_left + ", " + ia_right + " - " + ia_left + " + 1)"
+          end
+          if ia_aargs.length >= 2
+            return "sp_IntArray_slice(" + rc + ", " + compile_expr(ia_aargs[0]) + ", " + compile_expr(ia_aargs[1]) + ")"
+          end
+        end
         return "sp_IntArray_get(" + rc + ", " + compile_arg0(nid) + ")"
       end
       if mname == "push"
