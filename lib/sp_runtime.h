@@ -550,6 +550,10 @@ static volatile int sp_catch_top = 0;
 static void sp_throw(const char *tag, mrb_int val) { int i = sp_catch_top - 1; while (i >= 0) { if (strcmp(sp_catch_tag[i], tag) == 0) { sp_catch_val[i] = val; sp_catch_top = i + 1; longjmp(sp_catch_stack[i], 1); } i--; } fprintf(stderr, "uncaught throw: %s\n", tag); exit(1); }
 
 static const char *sp_file_read(const char *path) { FILE *f = fopen(path, "rb"); if (!f) return &("\xff" "")[1]; fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET); char *buf = sp_str_alloc(sz); if (sz > 0) { size_t r = fread(buf, 1, sz, f); (void)r; } buf[sz] = 0; fclose(f); return buf; }
+/* Binary read: returns the file's bytes as an IntArray (entries 0..255).
+   Unlike sp_file_read, this does not use a NUL-terminated String, so
+   binary data containing NUL bytes is preserved end-to-end. */
+static sp_IntArray *sp_file_binread(const char *path) { sp_IntArray *a = sp_IntArray_new(); FILE *f = fopen(path, "rb"); if (!f) return a; fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET); if (sz > 0) { unsigned char *buf = (unsigned char *)malloc(sz); size_t r = fread(buf, 1, sz, f); for (long i = 0; i < (long)r; i++) sp_IntArray_push(a, (mrb_int)buf[i]); free(buf); } fclose(f); return a; }
 static void sp_file_write(const char *path, const char *data) { FILE *f = fopen(path, "w"); if (f) { fputs(data, f); fclose(f); } }
 static mrb_bool sp_file_exist(const char *path) { FILE *f = fopen(path, "r"); if (f) { fclose(f); return TRUE; } return FALSE; }
 static void sp_file_delete(const char *path) { remove(path); }

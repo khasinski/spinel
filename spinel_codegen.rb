@@ -2450,6 +2450,9 @@ class Compiler
           if mname == "read"
             return "string"
           end
+          if mname == "binread"
+            return "int_array"
+          end
           if mname == "exist?"
             return "bool"
           end
@@ -14963,6 +14966,11 @@ class Compiler
         if mname == "read"
           @needs_file_io = 1
           return "sp_file_read(" + compile_arg0(nid) + ")"
+        end
+        if mname == "binread"
+          @needs_file_io = 1
+          @needs_int_array = 1
+          return "sp_file_binread(" + compile_arg0(nid) + ")"
         end
         if mname == "exist?"
           @needs_file_io = 1
