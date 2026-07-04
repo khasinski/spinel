@@ -65,3 +65,31 @@ puts lc.load(:alpha).inspect
 puts lc.load("beta").inspect
 puts lc.load(7).inspect
 puts lc.count
+
+# Shape (c): the reader is called with an IMPLICIT self (`t = table`) and
+# also feeds a `||=` local write. Both routes must spot the variant mismatch
+# between the local and the backing ivar (widened by a poly-keyed write) and
+# fall back to runtime dispatch instead of casting across layouts.
+class Registry
+  attr_reader :table
+  def initialize
+    @table = { alpha: [1, 2] }
+  end
+
+  def put(key, val)
+    @table[key] = val
+  end
+
+  def snapshot
+    t = table
+    puts t[:alpha].inspect
+    t2 = nil
+    t2 ||= self.table
+    puts t2[:beta].inspect
+  end
+end
+
+r = Registry.new
+r.put(:beta, [3, 4])
+r.put("gamma", [5, 6])
+r.snapshot

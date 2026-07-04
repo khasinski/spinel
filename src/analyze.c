@@ -3025,7 +3025,8 @@ void analyze_program(Compiler *c) {
       const char *nty = nt_type(c->nt, id);
       if (!nty || !sp_streq(nty, "LocalVariableWriteNode")) continue;
       const char *nm = nt_str(c->nt, id, "name");
-      LocalVar *lv = nm ? scope_local(comp_scope_of(c, id), nm) : NULL;
+      Scope *lsc0 = comp_scope_of(c, id);
+      LocalVar *lv = (nm && lsc0) ? scope_local(lsc0, nm) : NULL;
       if (!lv || lv->type != TY_POLY_POLY_HASH) continue;
       int v = nt_ref(c->nt, id, "value");
       if (v < 0) continue;
@@ -3054,7 +3055,10 @@ void analyze_program(Compiler *c) {
                 if (!nty2) continue;
                 if (!sp_streq(nty2, "InstanceVariableReadNode") &&
                     !sp_streq(nty2, "InstanceVariableWriteNode") &&
-                    !sp_streq(nty2, "InstanceVariableOrWriteNode")) continue;
+                    !sp_streq(nty2, "InstanceVariableOrWriteNode") &&
+                    !sp_streq(nty2, "InstanceVariableAndWriteNode") &&
+                    !sp_streq(nty2, "InstanceVariableOperatorWriteNode") &&
+                    !sp_streq(nty2, "InstanceVariableTargetNode")) continue;
                 Scope *s2 = comp_scope_of(c, nid2);
                 if (!s2 || s2->class_id != ci2) continue;
                 const char *nm2 = nt_str(c->nt, nid2, "name");
@@ -3063,10 +3067,11 @@ void analyze_program(Compiler *c) {
             }
           }
         }
+        int cap2 = (int)(sizeof stack / sizeof stack[0]);
         int nr2 = nt_num_refs(c->nt, nid);
-        for (int i2 = 0; i2 < nr2 && sp < 250; i2++) { int ch2 = nt_ref_at(c->nt, nid, i2); if (ch2 >= 0) stack[sp++] = ch2; }
+        for (int i2 = 0; i2 < nr2 && sp < cap2; i2++) { int ch2 = nt_ref_at(c->nt, nid, i2); if (ch2 >= 0) stack[sp++] = ch2; }
         int na2 = nt_num_arrs(c->nt, nid);
-        for (int i2 = 0; i2 < na2 && sp < 250; i2++) { int nn2 = 0; const int *ids2 = nt_arr_at(c->nt, nid, i2, &nn2); for (int k2 = 0; k2 < nn2 && sp < 250; k2++) if (ids2[k2] >= 0) stack[sp++] = ids2[k2]; }
+        for (int i2 = 0; i2 < na2 && sp < cap2; i2++) { int nn2 = 0; const int *ids2 = nt_arr_at(c->nt, nid, i2, &nn2); for (int k2 = 0; k2 < nn2 && sp < cap2; k2++) if (ids2[k2] >= 0) stack[sp++] = ids2[k2]; }
       }
     }
     if (hb_changed) {
@@ -4025,7 +4030,10 @@ void analyze_program(Compiler *c) {
      node-type cache so subscripts go through the runtime dispatch. */
   for (int id = 0; id < c->nt->count; id++) {
     const char *nty = nt_type(c->nt, id);
-    if (!nty || !sp_streq(nty, "LocalVariableWriteNode")) continue;
+    if (!nty || (!sp_streq(nty, "LocalVariableWriteNode") &&
+                 !sp_streq(nty, "LocalVariableOrWriteNode") &&
+                 !sp_streq(nty, "LocalVariableAndWriteNode") &&
+                 !sp_streq(nty, "LocalVariableOperatorWriteNode"))) continue;
     const char *nm = nt_str(c->nt, id, "name");
     Scope *lsc = comp_scope_of(c, id);
     LocalVar *lv = nm && lsc ? scope_local(lsc, nm) : NULL;
@@ -4040,17 +4048,34 @@ void analyze_program(Compiler *c) {
       int vargs = nt_ref(c->nt, v, "arguments");
       int vac = 0; if (vargs >= 0) nt_arr(c->nt, vargs, "arguments", &vac);
       const char *vnm = nt_str(c->nt, v, "name");
-      if (vrecv >= 0 && vac == 0 && vnm && nt_ref(c->nt, v, "block") < 0) {
-        TyKind rt3 = comp_ntype(c, vrecv);
-        for (int ci3 = 0; ci3 < c->nclasses && !widen2; ci3++) {
-          if (ty_is_object(rt3) && ty_object_class(rt3) != ci3) continue;
-          if (!ty_is_object(rt3) && rt3 != TY_POLY) break;
-          if (!ty_is_object(rt3) && !c->classes[ci3].instantiated) continue;
-          int pdc3 = -1;
-          if (!comp_reader_in_chain(c, ci3, vnm, &pdc3)) continue;
-          char ivn3[300]; snprintf(ivn3, sizeof ivn3, "@%s", comp_resolve_alias(c, pdc3, vnm));
-          int ix3 = comp_ivar_index(&c->classes[pdc3], ivn3);
-          if (ix3 >= 0 && c->classes[pdc3].ivar_types[ix3] != lv->type) widen2 = 1;
+      if (vac == 0 && vnm && nt_ref(c->nt, v, "block") < 0) {
+        if (vrecv >= 0) {
+          TyKind rt3 = comp_ntype(c, vrecv);
+          for (int ci3 = 0; ci3 < c->nclasses && !widen2; ci3++) {
+            if (ty_is_object(rt3) && ty_object_class(rt3) != ci3) continue;
+            if (!ty_is_object(rt3) && rt3 != TY_POLY) break;
+            if (!ty_is_object(rt3) && !c->classes[ci3].instantiated) continue;
+            int pdc3 = -1;
+            if (!comp_reader_in_chain(c, ci3, vnm, &pdc3)) continue;
+            char ivn3[300]; snprintf(ivn3, sizeof ivn3, "@%s", comp_resolve_alias(c, pdc3, vnm));
+            int ix3 = comp_ivar_index(&c->classes[pdc3], ivn3);
+            if (ix3 >= 0 && c->classes[pdc3].ivar_types[ix3] != lv->type) widen2 = 1;
+          }
+        }
+        else {
+          /* implicit self: `opts = options` inside the class body reads
+             the same-named reader; resolve the receiver class from the
+             enclosing scope */
+          Scope *vsc = comp_scope_of(c, v);
+          int ci3 = vsc ? vsc->class_id : -1;
+          if (ci3 >= 0 && ci3 < c->nclasses) {
+            int pdc3 = -1;
+            if (comp_reader_in_chain(c, ci3, vnm, &pdc3)) {
+              char ivn3[300]; snprintf(ivn3, sizeof ivn3, "@%s", comp_resolve_alias(c, pdc3, vnm));
+              int ix3 = comp_ivar_index(&c->classes[pdc3], ivn3);
+              if (ix3 >= 0 && c->classes[pdc3].ivar_types[ix3] != lv->type) widen2 = 1;
+            }
+          }
         }
       }
     }
@@ -4061,7 +4086,8 @@ void analyze_program(Compiler *c) {
         const char *t4 = nt_type(c->nt, nid2);
         if (!t4) continue;
         if (!sp_streq(t4, "LocalVariableReadNode") && !sp_streq(t4, "LocalVariableWriteNode") &&
-            !sp_streq(t4, "LocalVariableTargetNode") && !sp_streq(t4, "LocalVariableOrWriteNode")) continue;
+            !sp_streq(t4, "LocalVariableTargetNode") && !sp_streq(t4, "LocalVariableOrWriteNode") &&
+            !sp_streq(t4, "LocalVariableAndWriteNode") && !sp_streq(t4, "LocalVariableOperatorWriteNode")) continue;
         const char *n4 = nt_str(c->nt, nid2, "name");
         if (!n4 || !sp_streq(n4, nm)) continue;
         if (comp_scope_of(c, nid2) != lsc) continue;
