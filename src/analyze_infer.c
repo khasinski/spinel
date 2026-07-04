@@ -1558,14 +1558,16 @@ else {
       const char *sym = sp_streq(a0ty, "SymbolNode")
                           ? nt_str(nt, argv[0], "value") : nt_str(nt, argv[0], "content");
       if (sym && sym[0] == '@') {
+        /* ty_unify keeps a still-unresolved (TY_UNKNOWN) slot from widening
+           the result mid-fixpoint and folds int into bigint losslessly (the
+           codegen inserts sp_bigint_new_int at that boundary). */
         TyKind uni = TY_UNKNOWN;
         for (int ci = 0; ci < c->nclasses; ci++) {
           if (!c->classes[ci].instantiated) continue;
           int iv = comp_ivar_index(&c->classes[ci], sym);
           if (iv < 0) continue;
-          TyKind t = c->classes[ci].ivar_types[iv];
-          if (uni == TY_UNKNOWN) uni = t;
-          else if (uni != t) { uni = TY_POLY; break; }
+          uni = ty_unify(uni, c->classes[ci].ivar_types[iv]);
+          if (uni == TY_POLY) break;
         }
         return uni == TY_UNKNOWN ? TY_POLY : uni;
       }

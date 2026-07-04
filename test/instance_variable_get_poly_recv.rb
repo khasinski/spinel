@@ -1,7 +1,7 @@
 # instance_variable_get with a literal :@name on a receiver whose static
 # type is poly: dispatch the field read over every instantiated class that
 # owns the slot, unifying the declared slot types (mixed types stay poly,
-# a single shared type stays concrete).
+# a single shared type stays concrete, int folds into bigint).
 
 class Grid
   def initialize
@@ -27,6 +27,18 @@ class Pile
   end
 end
 
+class BigCounter
+  def initialize
+    @n = 10 ** 25
+  end
+end
+
+class SmallCounter
+  def initialize
+    @n = 7
+  end
+end
+
 class Manager
   # called with Grid and Table, so obj unifies to poly; the slot types
   # differ (array vs hash), so the result stays poly too
@@ -38,6 +50,8 @@ class Manager
     else
       p cols["w"]
     end
+    # no class anywhere defines @missing: reads as nil for every receiver
+    p obj.instance_variable_get(:@missing)
   end
 
   # called with Deck and Pile, so obj unifies to poly; both slots are
@@ -47,6 +61,13 @@ class Manager
     puts rows.length
     puts rows[1]
   end
+
+  # bigint and int slots unify to bigint; the int slot is promoted
+  # losslessly at the read
+  def count_of(obj)
+    n = obj.instance_variable_get(:@n)
+    puts n
+  end
 end
 
 m = Manager.new
@@ -54,3 +75,5 @@ m.describe(Grid.new)
 m.describe(Table.new)
 m.row_info(Deck.new)
 m.row_info(Pile.new)
+m.count_of(BigCounter.new)
+m.count_of(SmallCounter.new)

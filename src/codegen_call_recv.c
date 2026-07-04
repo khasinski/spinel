@@ -3806,22 +3806,36 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     if (sym && sym[0] == '@') {
       TyKind res = comp_ntype(c, id);
       int tv = ++g_tmp;
+      int has_cases = 0;
+      for (int k = 0; k < c->nclasses; k++)
+        if (c->classes[k].instantiated && comp_ivar_index(&c->classes[k], sym) >= 0) has_cases++;
       buf_printf(b, "({ sp_RbVal _t%d = ", tv);
       emit_expr(c, recv, b);
-      buf_printf(b, "; sp_RbVal _ivg%d = sp_box_nil(); if (_t%d.tag == SP_TAG_OBJ) switch (_t%d.cls_id) {",
-                 tv, tv, tv);
-      for (int k = 0; k < c->nclasses; k++) {
-        if (!c->classes[k].instantiated) continue;
-        int iv = comp_ivar_index(&c->classes[k], sym);
-        if (iv < 0) continue;
-        TyKind t = c->classes[k].ivar_types[iv];
-        char fld[320];
-        snprintf(fld, sizeof fld, "((sp_%s *)_t%d.v.p)->iv_%s", c->classes[k].name, tv, sym + 1);
-        buf_printf(b, " case %d: _ivg%d = ", k, tv);
-        emit_boxed_text(c, t, fld, b);
-        buf_puts(b, "; break;");
+      buf_printf(b, "; sp_RbVal _ivg%d = sp_box_nil(); ", tv);
+      /* No instantiated class owns the slot: the read is nil for every
+         possible receiver, so skip the empty switch (the receiver was still
+         evaluated for its effects). */
+      if (!has_cases) buf_printf(b, "(void)_t%d; ", tv);
+      else {
+        buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ) switch (_t%d.cls_id) {", tv, tv);
+        for (int k = 0; k < c->nclasses; k++) {
+          if (!c->classes[k].instantiated) continue;
+          int iv = comp_ivar_index(&c->classes[k], sym);
+          if (iv < 0) continue;
+          TyKind t = c->classes[k].ivar_types[iv];
+          char fld[512];
+          snprintf(fld, sizeof fld, "((sp_%s *)_t%d.v.p)->iv_%s", c->classes[k].name, tv, sym + 1);
+          buf_printf(b, " case %d: _ivg%d = ", k, tv);
+          /* an int slot under a bigint-unified result crosses the int->bigint
+             boundary ty_unify allows for (see the inference rule) */
+          if (res == TY_BIGINT && t == TY_INT)
+            buf_printf(b, "sp_box_bigint(sp_bigint_new_int(%s))", fld);
+          else
+            emit_boxed_text(c, t, fld, b);
+          buf_puts(b, "; break;");
+        }
+        buf_puts(b, " } ");
       }
-      buf_puts(b, " } ");
       if (res != TY_POLY && res != TY_UNKNOWN) {
         char ivn[24]; snprintf(ivn, sizeof ivn, "_ivg%d", tv);
         emit_unbox_text(c, res, ivn, b);
