@@ -5800,7 +5800,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     if (sp_streq(name, "ldexp") && argc == 2) {
       buf_puts(b, "ldexp(");
       emit_float_expr(c, argv[0], b); buf_puts(b, ", (int)");
-      emit_expr(c, argv[1], b); buf_puts(b, ")");
+      emit_int_expr(c, argv[1], b); buf_puts(b, ")");  /* poly exponent -> mrb_int, not raw sp_RbVal */
       return;
     }
   }
