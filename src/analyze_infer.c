@@ -126,9 +126,16 @@ static TyKind an_unpack1_lit_type(const NodeTable *nt, int arg) {
   char d = f[0];
   const char *p = f + 1;
   while (*p == '<' || *p == '>' || *p == '!' || *p == '_') p++;
-  while (*p >= '0' && *p <= '9') p++;
+  long count = -1;  /* -1 = no explicit count digits */
+  if (*p >= '0' && *p <= '9') { count = 0; while (*p >= '0' && *p <= '9') count = count * 10 + (*p++ - '0'); }
   if (*p == '*') p++;
   if (*p) return TY_POLY;  /* further directives: not this one's type */
+  /* An explicit 0-count directive ("V0") decodes no value: sp_str_unpack
+     yields an empty array and Ruby's unpack1 returns nil. Keep it TY_POLY so
+     the nil survives rather than being unboxed to 0 by sp_poly_to_i. (A
+     short-input runtime nil -- input shorter than the directive needs -- is a
+     length property inference cannot see, so that case still unboxes to 0.) */
+  if (count == 0) return TY_POLY;
   if (strchr("cCsSlLqQnNvV", d)) return TY_INT;
   return TY_POLY;
 }
