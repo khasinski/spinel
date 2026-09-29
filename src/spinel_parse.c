@@ -3207,6 +3207,8 @@ static char *sp_splice_object_space(char *source, const char *exe_path,
   return sp_prepend_builtin_file(source, exe_path, "builtins/object_space.rb", fsl, fsl_n);
 }
 
+#include "sp_array_sub.c"
+
 static char *sp_splice_builtins(char *source, const char *exe_path,
                                 unsigned char **fsl, size_t *fsl_n) {
   if (getenv("SPINEL_NO_BUILTINS")) return source;   /* the A/B switch: the C emitters alone */
@@ -4404,6 +4406,11 @@ static int sp_parse_emit(const char *source_file, const char *argv0, SpStrBuf *o
   source = sp_splice_builtins(source, argv0, &fsl, &fsl_n);
   source = sp_splice_builtin_extras(source, argv0, &fsl, &fsl_n);
   source = sp_splice_builtin_enumerator(source, argv0, &fsl, &fsl_n);
+
+  /* class X < Array: the elements in an array of its own, Array's methods
+     forwarded to it (sp_array_sub.c); line count kept */
+  { char *as = sp_expand_array_subclasses(source);
+    if (as) { free(source); source = as; } }
 
   /* Debug: build the buffer-line -> (file, original line) map from the
      marker-annotated buffer *before* syntax-sugar rewriting (which could

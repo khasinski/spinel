@@ -311,7 +311,7 @@ build/csrc/codegen_util.o: build/csrc/sp_rt_names.h
 
 FORCE:
 
-build/csrc/sp_parse_lib.o: src/spinel_parse.c $(PRISM_LIB) | build/csrc
+build/csrc/sp_parse_lib.o: src/spinel_parse.c src/sp_array_sub.c src/array_method_names.inc $(PRISM_LIB) | build/csrc
 	$(CC) $(CFLAGS) -I$(PRISM_INC) -c src/spinel_parse.c -o $@
 
 # The compiler links the regexp engine so it can compile a literal at build

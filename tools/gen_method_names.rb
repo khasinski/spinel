@@ -8,6 +8,9 @@
 #   src/object_method_names.inc         Object's instance methods, public and
 #                                       private (Kernel's puts, raise, ...)
 #   src/object_public_method_names.inc  Object's public instance methods
+#   src/array_method_names.inc          Array's public instance methods beyond
+#                                       Object's (what an Array subclass
+#                                       forwards), plus inspect/to_s/==
 core = ObjectSpace.each_object(Module).select do |m|
   n = m.name
   n && !n.include?("::") && Object.const_get(n).equal?(m) rescue false
@@ -26,3 +29,5 @@ emit("#{dir}/core_method_names.inc",
 emit("#{dir}/object_method_names.inc",
      "Object's instance method names, public and private.", obj_all)
 emit("#{dir}/object_public_method_names.inc", "Object's public instance method names.", obj_pub)
+arr = ((Array.public_instance_methods - Object.public_instance_methods) + %i[inspect to_s == hash eql?]).map(&:to_s).uniq.sort
+emit("#{dir}/array_method_names.inc", "Array's public instance method names beyond Object's.", arr)
