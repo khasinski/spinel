@@ -12326,3 +12326,278 @@ int desugar_respond_to_missing(Compiler *c) {
   if (changed) comp_grow_node_arrays(c);
   return changed;
 }
+
+/* ---- method_missing and core method names -----------------------------------
+ *
+ *   class Image
+ *     def method_missing(name, *args, **opts) = Operation.call(name.to_s, [self, *args], opts)
+ *   end
+ *   img.max        # CRuby: Image has no #max, so method_missing(:max)
+ *
+ * rewrite_method_missing_calls leaves core names alone (an Array receiver of
+ * `max` must keep Array#max). For a class that defines method_missing, each
+ * core name the program calls that the class does not answer -- not an
+ * Object/Kernel method, not its own or an ancestor's or an included module's,
+ * not Enumerable's/Comparable's when it includes those -- gets a forwarder
+ *
+ *   def max(*spinel_mm_a, &spinel_mm_b) = method_missing(:max, *spinel_mm_a, &spinel_mm_b)
+ *
+ * so dispatch on the object reaches the hook as CRuby's would. */
+
+static const char *const ENUMERABLE_METHOD_NAMES[] = {
+#include "enumerable_method_names.inc"
+  NULL };
+static const char *const COMPARABLE_METHOD_NAMES[] = {
+#include "comparable_method_names.inc"
+  NULL };
+
+static const char *mm_literal_name(const NodeTable *nt, int node) {
+  if (node < 0) return NULL;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_SymbolNode) return nt_str(nt, node, "value");
+  if (k == NK_StringNode) {
+    const char *s = nt_str(nt, node, "content");
+    return s ? s : nt_str(nt, node, "unescaped");
+  }
+  return NULL;
+}
+
+static int mm_local_read(NodeTable *nt, int like, const char *name) {
+  int rd = fwd_new_node_like(nt, like, "LocalVariableReadNode");
+  nt_node_set_str(nt, rd, "name", name);
+  nt_node_set_int(nt, rd, "depth", 0);
+  return rd;
+}
+
+static int mm_symbol(NodeTable *nt, int like, const char *name) {
+  int sy = fwd_new_node_like(nt, like, "SymbolNode");
+  nt_node_set_str(nt, sy, "value", name);
+  nt_node_set_str(nt, sy, "unescaped", name);
+  return sy;
+}
+
+static const char *mm_node_cname(const NodeTable *nt, int m) {
+  int cp = nt_ref(nt, m, "constant_path");
+  return cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+}
+
+/* does the class/module named cn (any of its bodies), its superclasses or the
+   modules its bodies include, define / declare `name`? Also reports whether
+   Enumerable / Comparable are included along the way. */
+static int mm_chain_defines(const NodeTable *nt, int n0, const char *cn, const char *name,
+                            int *enm, int *cmp, int depth) {
+  if (!cn || depth > 16) return 0;
+  for (int m = 0; m < n0; m++) {
+    NodeKind mk = nt_kind(nt, m);
+    if (mk != NK_ClassNode && mk != NK_ModuleNode) continue;
+    const char *mn = mm_node_cname(nt, m);
+    if (!mn || !sp_streq(mn, cn)) continue;
+    int body = nt_ref(nt, m, "body");
+    int bn = 0; const int *bs = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+    for (int k = 0; k < bn; k++) {
+      NodeKind sk = nt_kind(nt, bs[k]);
+      const char *sn = nt_str(nt, bs[k], "name");
+      /* a def, or one a visibility call wraps (`private def max`) */
+      int dd = fwd_body_def(nt, bs[k]);
+      if (dd >= 0 && nt_ref(nt, dd, "receiver") < 0 && nt_str(nt, dd, "name") &&
+          sp_streq(nt_str(nt, dd, "name"), name)) return 1;
+      if (sk == NK_AliasMethodNode) {
+        int nn = nt_ref(nt, bs[k], "new_name");
+        const char *an = nn >= 0 ? mm_literal_name(nt, nn) : NULL;
+        if (an && sp_streq(an, name)) return 1;
+      }
+      if (sk != NK_CallNode || nt_ref(nt, bs[k], "receiver") >= 0 || !sn) continue;
+      int an = nt_ref(nt, bs[k], "arguments");
+      int ac = 0; const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &ac) : NULL;
+      if (sp_streq(sn, "include") || sp_streq(sn, "prepend")) {
+        for (int a = 0; a < ac; a++) {
+          const char *inc = nt_str(nt, av[a], "name");
+          if (!inc) continue;
+          if (sp_streq(inc, "Enumerable")) *enm = 1;
+          else if (sp_streq(inc, "Comparable")) *cmp = 1;
+          else if (mm_chain_defines(nt, n0, inc, name, enm, cmp, depth + 1)) return 1;
+        }
+      }
+      else if (sp_streq(sn, "attr_reader") || sp_streq(sn, "attr_accessor") ||
+               sp_streq(sn, "attr_writer") || sp_streq(sn, "attr") ||
+               sp_streq(sn, "alias_method") || sp_streq(sn, "define_method") ||
+               sp_streq(sn, "def_delegators") || sp_streq(sn, "def_delegator")) {
+        for (int a = 0; a < ac; a++) {
+          const char *s = mm_literal_name(nt, av[a]);
+          if (!s) continue;
+          if (sp_streq(s, name)) return 1;
+          size_t l = strlen(s);
+          if ((sp_streq(sn, "attr_writer") || sp_streq(sn, "attr_accessor")) &&
+              strlen(name) == l + 1 && strncmp(name, s, l) == 0 && name[l] == '=') return 1;
+        }
+      }
+    }
+    if (mk == NK_ClassNode) {
+      int sup = nt_ref(nt, m, "superclass");
+      const char *sname = sup >= 0 ? nt_str(nt, sup, "name") : NULL;
+      if (sup >= 0 && !sname) return 1;       /* a computed superclass: unknown */
+      if (sname && mm_chain_defines(nt, n0, sname, name, enm, cmp, depth + 1)) return 1;
+      /* a superclass the program does not define (Array, Hash, a library's)
+         may answer any core name itself: `class Vec < Array` keeps Array#max */
+      if (sname) {
+        int known = 0;
+        for (int k = 0; k < n0 && !known; k++) {
+          NodeKind kk = nt_kind(nt, k);
+          if (kk != NK_ClassNode && kk != NK_ModuleNode) continue;
+          const char *kn = mm_node_cname(nt, k);
+          if (kn && sp_streq(kn, sname)) known = 1;
+        }
+        if (!known) return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+/* Names a program calls as part of a protocol on whatever it holds --
+   conversions, iteration, container and string access, IO. CRuby would route
+   them to method_missing too, but a forwarder for them turns every run-time
+   typed `x.to_f` / `x.each` / `x.size` in the program into a call that may
+   answer anything, so they are left to NoMethodError. What remains are the
+   value operations a hook class stands in for (vips' Image#max, #round,
+   #flatten, operators). */
+static int mm_protocol_name(const char *n) {
+  size_t l = strlen(n);
+  if (strncmp(n, "to_", 3) == 0 || strncmp(n, "each", 4) == 0) return 1;
+  if (l > 1 && (n[l - 1] == '?' || n[l - 1] == '!' ||
+                (n[l - 1] == '=' && n[l - 2] != '=' && n[l - 2] != '<' && n[l - 2] != '>' && n[l - 2] != '!')))
+    return 1;
+  static const char *const P[] = { "call", "new", "name", "message", "arity", "members",
+    "begin", "end", "class_eval", "module_eval", "size", "length", "count", "first", "last",
+    "fetch", "dig", "keys", "values", "join", "map", "collect", "flat_map", "find", "detect",
+    "select", "filter", "reject", "reduce", "inject", "sum", "sort", "sort_by", "min_by",
+    "max_by", "group_by", "partition", "zip", "take", "drop", "push", "pop", "shift",
+    "unshift", "append", "prepend", "insert", "<<", "concat", "delete", "delete_at",
+    "delete_if", "clear", "merge", "update", "store", "add", "times", "upto", "downto",
+    "step", "loop", "write", "read", "puts", "print", "close", "sync", "flush", "gets",
+    "bytesize", "bytes", "chars", "lines", "unpack", "unpack1", "pack", "strftime",
+    "offset", "div", "divmod", "reverse", "tr", "rjust", "ljust", "center", "downcase",
+    "upcase", "capitalize", "strip", "chomp", "split", "sub", "gsub", "scan", "match",
+    "index", "slice", "tally", "uniq", "compact", "cycle", "lazy", "with_index",
+    "with_object", "entries", "chunk", "hash", "encoding", "force_encoding", "encode",
+    "ord", "chr", "succ", "next", "pred", "then", "tap", "value", "result", "key",
+    "path", "start", "stop", "run", "wait", "join", "kill", "status", "resume", NULL };
+  return name_in_list(P, n);
+}
+
+int desugar_method_missing_core_forwarders(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int n0 = nt->count, changed = 0;
+  /* classes with an instance method_missing */
+  int *hooks = NULL; int nh = 0, hcap = 0;
+  for (int m = 0; m < n0; m++) {
+    if (nt_kind(nt, m) != NK_ClassNode) continue;
+    /* Object's is the default hook (builtins/method_missing.rb): every class
+       answers through it, and it takes no forwarders */
+    const char *hn = mm_node_cname(nt, m);
+    if (!hn || sp_streq(hn, "Object") || sp_streq(hn, "BasicObject")) continue;
+    int body = nt_ref(nt, m, "body");
+    int bn = 0; const int *bs = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+    for (int k = 0; k < bn; k++) {
+      int dd = fwd_body_def(nt, bs[k]);   /* also `private def method_missing` */
+      if (dd >= 0 && nt_ref(nt, dd, "receiver") < 0 &&
+          nt_str(nt, dd, "name") && sp_streq(nt_str(nt, dd, "name"), "method_missing")) {
+        if (nh == hcap) {
+          hcap = hcap ? hcap * 2 : 16;
+          hooks = realloc(hooks, sizeof(int) * (size_t)hcap);
+          if (!hooks) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+        }
+        hooks[nh++] = m; break;
+      }
+    }
+  }
+  if (nh == 0) { free(hooks); return 0; }
+  /* the core names the program calls on a receiver */
+  char **names = NULL; int nn = 0, cap = 0;
+  for (int id = 0; id < n0; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    const char *nm = nt_str(nt, id, "name");
+    int recv = nt_ref(nt, id, "receiver");
+    if (!nm || recv < 0) continue;
+    NodeKind rk = nt_kind(nt, recv);
+    if (rk == NK_ConstantReadNode || rk == NK_ConstantPathNode || rk == NK_ArrayNode ||
+        rk == NK_HashNode || rk == NK_StringNode || rk == NK_IntegerNode) continue;
+    if (!core_method_name(nm) || name_in_list(OBJECT_METHOD_NAMES, nm)) continue;
+    if (sp_streq(nm, "method_missing") || sp_streq(nm, "initialize")) continue;
+    if (mm_protocol_name(nm)) continue;
+    int dup = 0;
+    for (int q = 0; q < nn && !dup; q++) if (sp_streq(names[q], nm)) dup = 1;
+    if (dup) continue;
+    if (nn == cap) {
+      cap = cap ? cap * 2 : 64;
+      names = realloc(names, sizeof(char *) * (size_t)cap);
+      if (!names) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    }
+    names[nn++] = strdup(nm);
+  }
+  for (int h = 0; h < nh; h++) {
+    int m = hooks[h];
+    const char *cn = mm_node_cname(nt, m);
+    int body = nt_ref(nt, m, "body");
+    if (!cn || body < 0) continue;
+    int *add = NULL; int na = 0;
+    for (int q = 0; q < nn; q++) {
+      int enm = 0, cmp = 0;
+      if (mm_chain_defines(nt, n0, cn, names[q], &enm, &cmp, 0)) continue;
+      if (enm && name_in_list(ENUMERABLE_METHOD_NAMES, names[q])) continue;
+      if (cmp && name_in_list(COMPARABLE_METHOD_NAMES, names[q])) continue;
+      /* def name(*spinel_mm_a, **spinel_mm_k, &spinel_mm_b) =
+           method_missing(:name, *spinel_mm_a, **spinel_mm_k, &spinel_mm_b) */
+      int d = fwd_new_node_like(nt, m, "DefNode");
+      int ps = fwd_new_node_like(nt, m, "ParametersNode");
+      int rp = fwd_new_node_like(nt, m, "RestParameterNode");
+      int bp = fwd_new_node_like(nt, m, "BlockParameterNode");
+      nt_node_set_str(nt, rp, "name", "spinel_mm_a");
+      nt_node_set_str(nt, bp, "name", "spinel_mm_b");
+      int kp = fwd_new_node_like(nt, m, "KeywordRestParameterNode");
+      nt_node_set_str(nt, kp, "name", "spinel_mm_k");
+      nt_node_set_ref(nt, ps, "rest", rp);
+      nt_node_set_ref(nt, ps, "keyword_rest", kp);
+      nt_node_set_ref(nt, ps, "block", bp);
+      int call = fwd_new_node_like(nt, m, "CallNode");
+      int args = fwd_new_node_like(nt, m, "ArgumentsNode");
+      int spl = fwd_new_node_like(nt, m, "SplatNode");
+      nt_node_set_ref(nt, spl, "expression", mm_local_read(nt, m, "spinel_mm_a"));
+      int kh = fwd_new_node_like(nt, m, "KeywordHashNode");
+      int ks = fwd_new_node_like(nt, m, "AssocSplatNode");
+      nt_node_set_ref(nt, ks, "value", mm_local_read(nt, m, "spinel_mm_k"));
+      nt_node_set_arr(nt, kh, "elements", &ks, 1);
+      int av[3] = { mm_symbol(nt, m, names[q]), spl, kh };
+      nt_node_set_arr(nt, args, "arguments", av, 3);
+      int ba = fwd_new_node_like(nt, m, "BlockArgumentNode");
+      nt_node_set_ref(nt, ba, "expression", mm_local_read(nt, m, "spinel_mm_b"));
+      nt_node_set_str(nt, call, "name", "method_missing");
+      nt_node_set_ref(nt, call, "arguments", args);
+      nt_node_set_ref(nt, call, "block", ba);
+      int db = fwd_new_node_like(nt, m, "StatementsNode");
+      nt_node_set_arr(nt, db, "body", &call, 1);
+      nt_node_set_str(nt, d, "name", names[q]);
+      nt_node_set_ref(nt, d, "parameters", ps);
+      nt_node_set_ref(nt, d, "body", db);
+      add = realloc(add, sizeof(int) * (size_t)(na + 1));
+      if (!add) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+      add[na++] = d;
+    }
+    if (na) {
+      int bn = 0; const int *bs = nt_arr(nt, body, "body", &bn);
+      int *out = malloc(sizeof(int) * (size_t)(bn + na));
+      if (!out) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+      memcpy(out, add, sizeof(int) * (size_t)na);
+      memcpy(out + na, bs, sizeof(int) * (size_t)bn);
+      nt_node_set_arr(nt, body, "body", out, bn + na);
+      free(out);
+      changed = 1;
+    }
+    free(add);
+  }
+  for (int q = 0; q < nn; q++) free(names[q]);
+  free(names);
+  free(hooks);
+  if (changed) comp_grow_node_arrays(c);
+  return changed;
+}

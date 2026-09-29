@@ -10,6 +10,8 @@
 #   src/object_public_method_names.inc  Object's public instance methods
 #   src/module_method_names.inc         Module's instance methods, public and
 #                                       private (attr_accessor, include, ...)
+#   src/enumerable_method_names.inc     Enumerable's instance methods
+#   src/comparable_method_names.inc     Comparable's instance methods
 core = ObjectSpace.each_object(Module).select do |m|
   n = m.name
   n && !n.include?("::") && Object.const_get(n).equal?(m) rescue false
@@ -30,3 +32,7 @@ emit("#{dir}/object_method_names.inc",
      "Object's instance method names, public and private.", obj_all)
 emit("#{dir}/object_public_method_names.inc", "Object's public instance method names.", obj_pub)
 emit("#{dir}/module_method_names.inc", "Module's instance method names, public and private.", mod_all)
+emit("#{dir}/enumerable_method_names.inc", "Enumerable's instance method names.",
+     Enumerable.instance_methods.map(&:to_s).sort)
+emit("#{dir}/comparable_method_names.inc", "Comparable's instance method names.",
+     Comparable.instance_methods.map(&:to_s).sort)

@@ -433,6 +433,7 @@ int desugar_builtin_reopen_methods(Compiler *c);
 int desugar_object_method_builtin_overrides(Compiler *c);
 int desugar_body_ivars(Compiler *c);
 int rewrite_method_missing_calls(Compiler *c);
+int desugar_method_missing_core_forwarders(Compiler *c);
 int desugar_respond_to_missing(Compiler *c);
 int desugar_when_int_float_ranges(Compiler *c);
 int desugar_duplicate_underscore_params(Compiler *c);
